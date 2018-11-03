@@ -40,7 +40,7 @@ namespace BTCPayServer.Services
             public async Task<byte[][]> Exchange(byte[][] apdus, CancellationToken cancellationToken)
             {
                 List<byte[]> responses = new List<byte[]>();
-                foreach (var subapdu in NBXplorer.ExtensionsClient.Batch(apdus, 10))
+                foreach (var subapdu in NBXplorer.ExtensionsClient.Batch(apdus, 1))
                 {
                     await _Semaphore.WaitAsync();
 
