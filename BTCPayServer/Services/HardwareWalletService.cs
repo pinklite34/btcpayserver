@@ -39,27 +39,31 @@ namespace BTCPayServer.Services
             SemaphoreSlim _Semaphore = new SemaphoreSlim(1, 1);
             public async Task<byte[][]> Exchange(byte[][] apdus, CancellationToken cancellationToken)
             {
-                await _Semaphore.WaitAsync();
                 List<byte[]> responses = new List<byte[]>();
-                try
+                foreach (var subapdu in NBXplorer.ExtensionsClient.Batch(apdus, 10))
                 {
-                    foreach (var apdu in apdus)
+                    await _Semaphore.WaitAsync();
+
+                    try
                     {
-                        await this.webSocket.SendAsync(new ArraySegment<byte>(apdu), WebSocketMessageType.Binary, true, cancellationToken);
+                        foreach (var apdu in subapdu)
+                        {
+                            await this.webSocket.SendAsync(new ArraySegment<byte>(apdu), WebSocketMessageType.Binary, true, cancellationToken);
+                        }
+                        foreach (var apdu in subapdu)
+                        {
+                            byte[] response = new byte[300];
+                            Logs.PayServer.LogInformation($">> {Encoders.Hex.EncodeData(apdu)}");
+                            var result = await this.webSocket.ReceiveAsync(new ArraySegment<byte>(response), cancellationToken);
+                            Array.Resize(ref response, result.Count);
+                            Logs.PayServer.LogInformation($"<< {Encoders.Hex.EncodeData(response)}");
+                            responses.Add(response);
+                        }
                     }
-                    foreach (var apdu in apdus)
+                    finally
                     {
-                        byte[] response = new byte[300];
-                        Logs.PayServer.LogInformation($">> {Encoders.Hex.EncodeData(apdu)}");
-                        var result = await this.webSocket.ReceiveAsync(new ArraySegment<byte>(response), cancellationToken);
-                        Array.Resize(ref response, result.Count);
-                        Logs.PayServer.LogInformation($"<< {Encoders.Hex.EncodeData(response)}");
-                        responses.Add(response);
+                        _Semaphore.Release();
                     }
-                }
-                finally
-                {
-                    _Semaphore.Release();
                 }
                 return responses.ToArray();
             }
