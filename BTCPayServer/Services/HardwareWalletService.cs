@@ -43,23 +43,19 @@ namespace BTCPayServer.Services
                 List<byte[]> responses = new List<byte[]>();
                 try
                 {
-                    StringBuilder builder = new StringBuilder();
                     foreach (var apdu in apdus)
                     {
-                        builder.AppendLine($">> {Encoders.Hex.EncodeData(apdu)}");
                         await this.webSocket.SendAsync(new ArraySegment<byte>(apdu), WebSocketMessageType.Binary, true, cancellationToken);
                     }
-                    Logs.PayServer.LogInformation(builder.ToString());
-                    builder = new StringBuilder();
                     foreach (var apdu in apdus)
                     {
                         byte[] response = new byte[300];
+                        Logs.PayServer.LogInformation($">> {Encoders.Hex.EncodeData(apdu)}");
                         var result = await this.webSocket.ReceiveAsync(new ArraySegment<byte>(response), cancellationToken);
                         Array.Resize(ref response, result.Count);
-                        builder.AppendLine($"<< {Encoders.Hex.EncodeData(response)}");
+                        Logs.PayServer.LogInformation($"<< {Encoders.Hex.EncodeData(response)}");
                         responses.Add(response);
                     }
-                    Logs.PayServer.LogInformation(builder.ToString());
                 }
                 finally
                 {
