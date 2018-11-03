@@ -32,6 +32,8 @@ using System.Globalization;
 using BTCPayServer.Services;
 using BTCPayServer.Data;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using LedgerWallet;
+using static LedgerWallet.LedgerClient;
 
 namespace BTCPayServer
 {
@@ -117,6 +119,126 @@ namespace BTCPayServer
                 SetHeader(resp, name, value);
                 return Task.CompletedTask;
             });
+        }
+
+        public static async Task<Transaction> SignTransactionAsyncEx(this LedgerClient client, SignatureRequest[] signatureRequests, Transaction transaction, KeyPath changePath = null, CancellationToken cancellation = default(CancellationToken))
+        {
+            if (signatureRequests.Length == 0)
+                throw new ArgumentException("No signatureRequests is passed", "signatureRequests");
+            var segwitCoins = signatureRequests.Where(s => s.InputCoin.GetHashVersion() == HashVersion.Witness).Count();
+            if (segwitCoins != signatureRequests.Count() && segwitCoins != 0)
+                throw new ArgumentException("Mixing segwit input with non segwit input is not supported", "signatureRequests");
+
+            var segwitMode = segwitCoins != 0;
+
+            var requests = signatureRequests
+                .ToDictionaryUnique(o => o.InputCoin.Outpoint);
+            transaction = transaction.Clone();
+            var inputsByOutpoint = transaction.Inputs.AsIndexedInputs().ToDictionary(i => i.PrevOut);
+            var coinsByOutpoint = requests.ToDictionary(o => o.Key, o => o.Value.InputCoin);
+
+            Logs.PayServer.LogInformation("---GETTING TRUSTED INPUTS---");
+            var trustedInputs = new List<TrustedInput>();
+            if (!segwitMode)
+            {
+                List<byte[]> trustedInputApdus = new List<byte[]>();
+                int i = 0;
+                foreach (var sigRequest in signatureRequests)
+                {
+                    var ti = await client.GetTrustedInputAsync(sigRequest.InputTransaction, (int)sigRequest.InputCoin.Outpoint.N);
+                    trustedInputs.Add(ti);
+                    Logs.PayServer.LogInformation($"Got input {i++}");
+                }
+            }
+            Logs.PayServer.LogInformation("---GOT THEM---");
+
+            var trustedInputsByOutpoint = trustedInputs.ToDictionaryUnique(i => i.OutPoint);
+            var apdus = new List<byte[]>();
+            var inputStartType = segwitMode ? InputStartType.NewSegwit : InputStartType.New;
+
+
+            var segwitParsedOnce = false;
+            for (var i = 0; i < signatureRequests.Length; i++)
+            {
+                var sigRequest = signatureRequests[i];
+                var input = inputsByOutpoint[sigRequest.InputCoin.Outpoint];
+                apdus.AddRange(client.UntrustedHashTransactionInputStart(inputStartType, input, trustedInputsByOutpoint, coinsByOutpoint, segwitMode, segwitParsedOnce));
+                Logs.PayServer.LogInformation($"UntrustedHashTransactionInputStart");
+                inputStartType = InputStartType.Continue;
+                if (!segwitMode || !segwitParsedOnce)
+                {
+                    apdus.AddRange(client.UntrustedHashTransactionInputFinalizeFull(changePath, transaction.Outputs));
+                    Logs.PayServer.LogInformation($"UntrustedHashTransactionInputFinalizeFull");
+                }
+                changePath = null; //do not resubmit the changepath
+                if (segwitMode && !segwitParsedOnce)
+                {
+                    segwitParsedOnce = true;
+                    i--; //pass once more
+                    continue;
+                }
+                apdus.Add(client.UntrustedHashSign(sigRequest.KeyPath, null, transaction.LockTime, SigHash.All));
+                Logs.PayServer.LogInformation($"UntrustedHashSign");
+            }
+            Logs.PayServer.LogInformation("--SIGNING ALL---");
+            var responses = await client.ExchangeAsync(apdus.ToArray(), cancellation).ConfigureAwait(false);
+            Logs.PayServer.LogInformation("--SIGNED!---");
+            foreach (var response in responses)
+                if (response.Response.Length > 10) //Probably a signature
+                    response.Response[0] = 0x30;
+            var signatures = responses.Where(p => TransactionSignature.IsValid(p.Response)).Select(p => new TransactionSignature(p.Response)).ToArray();
+            Logs.PayServer.LogInformation($"With {signatures.Length} signatures");
+            if (signatureRequests.Length != signatures.Length)
+                throw new LedgerWalletException("failed to sign some inputs");
+            var sigIndex = 0;
+
+            var builder = new TransactionBuilder();
+            foreach (var sigRequest in signatureRequests)
+            {
+                var input = inputsByOutpoint[sigRequest.InputCoin.Outpoint];
+                if (input == null)
+                    continue;
+                builder.AddCoins(sigRequest.InputCoin);
+                builder.AddKnownSignature(sigRequest.PubKey, signatures[sigIndex]);
+                sigIndex++;
+            }
+            builder.SignTransactionInPlace(transaction);
+            Logs.PayServer.LogInformation($"Fully signed");
+            sigIndex = 0;
+            foreach (var sigRequest in signatureRequests)
+            {
+                var input = inputsByOutpoint[sigRequest.InputCoin.Outpoint];
+                if (input == null)
+                    continue;
+                sigRequest.Signature = signatures[sigIndex];
+                if (!sigRequest.PubKey.Verify(transaction.GetSignatureHash(sigRequest.InputCoin, sigRequest.Signature.SigHash), sigRequest.Signature.Signature))
+                {
+                    foreach (var sigRequest2 in signatureRequests)
+                        sigRequest2.Signature = null;
+                    return null;
+                }
+                sigIndex++;
+            }
+
+            return transaction;
+        }
+        public static async Task<APDUResponse[]> ExchangeAsync(this LedgerClient client, byte[][] apdus, CancellationToken cancellation)
+        {
+            var responses = await client.Transport.Exchange(apdus, cancellation).ConfigureAwait(false);
+            var resultResponses = new List<APDUResponse>();
+            foreach (var response in responses)
+            {
+                if (response.Length < 2)
+                {
+                    throw new LedgerWalletException("Truncated response");
+                }
+                var sw = ((response[response.Length - 2] & 0xff) << 8) |
+                        response[response.Length - 1] & 0xff;
+                var result = new byte[response.Length - 2];
+                Array.Copy(response, 0, result, 0, response.Length - 2);
+                resultResponses.Add(new APDUResponse() { Response = result, SW = sw });
+            }
+            return resultResponses.ToArray();
         }
 
         public static void SetHeader(this HttpResponse resp, string name, string value)

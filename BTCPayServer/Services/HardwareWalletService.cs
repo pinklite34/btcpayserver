@@ -173,7 +173,7 @@ namespace BTCPayServer.Services
                                                      KeyPath changeKeyPath,
                                                      CancellationToken cancellationToken)
         {
-            return await Ledger.SignTransactionAsync(signatureRequests, unsigned, changeKeyPath, cancellationToken);
+            return await Ledger.SignTransactionAsyncEx(signatureRequests, unsigned, changeKeyPath, cancellationToken);
         }
 
         public void Dispose()
