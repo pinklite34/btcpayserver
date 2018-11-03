@@ -1,4 +1,5 @@
 ﻿using System;
+using Microsoft.Extensions.Logging;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -8,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Data;
 using BTCPayServer.HostedServices;
+using BTCPayServer.Logging;
 using BTCPayServer.ModelBinders;
 using BTCPayServer.Models;
 using BTCPayServer.Models.WalletViewModels;
@@ -569,13 +571,24 @@ namespace BTCPayServer.Controllers
 
 
                         signTimeout.CancelAfter(TimeSpan.FromMinutes(5));
-                        var transaction = await hw.SignTransactionAsync(usedCoins.Select(c => new SignatureRequest
+
+                        var requests = usedCoins.Select(c => new SignatureRequest
                         {
                             InputTransaction = parentTransactions.TryGet(c.Outpoint.Hash),
                             InputCoin = c,
                             KeyPath = foundKeyPath.Derive(keypaths[c.TxOut.ScriptPubKey]),
                             PubKey = strategy.Root.Derive(keypaths[c.TxOut.ScriptPubKey]).PubKey
-                        }).ToArray(), unsigned, hasChange ? foundKeyPath.Derive(changeAddress.Item2) : null, signTimeout.Token);
+                        }).ToArray();
+
+                        Logs.PayServer.LogInformation($"Total signature requests: {requests.Count()}");
+
+                        foreach (var request in requests)
+                        {
+                            Logs.PayServer.LogInformation($"From tx of size {request.InputTransaction.GetSerializedSize()}: {request.InputTransaction.GetHash()}");
+                        }
+
+                        var transaction = await hw.SignTransactionAsync(requests, unsigned, hasChange ? foundKeyPath.Derive(changeAddress.Item2) : null, signTimeout.Token);
+                        Logs.PayServer.LogInformation($"SIGNED!");
                         try
                         {
                             var broadcastResult = await wallet.BroadcastTransactionsAsync(new List<Transaction>() { transaction });
